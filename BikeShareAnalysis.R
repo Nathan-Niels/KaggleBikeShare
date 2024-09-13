@@ -29,3 +29,31 @@ kaggle_submission <- bike_predictions %>%
 vroom_write(x = kaggle_submission,
             file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/LinearPreds.csv", 
             delim = ",")
+
+## Poisson Regression
+library(poissonreg)
+
+# Write poisson model
+my_pois_model <- poisson_reg() %>% 
+  set_engine("glm") %>% # glm = generalized linear model
+  set_mode("regression") %>% 
+  fit(formula = count ~ season + holiday + workingday + weather +
+        temp + humidity + windspeed, # omitted atemp
+      data = train_data)
+
+# Generating predictions using linear model
+bike_predictions_pois <- predict(my_pois_model,
+                                 new_data = test_data)
+bike_predictions_pois
+
+# Format predictions for Kaggle submission
+pois_kaggle_submission <- bike_predictions_pois %>% 
+  bind_cols(., test_data) %>% # bind predictions with test data
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+# Write out file
+vroom_write(x = pois_kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/PoissonPreds.csv", 
+            delim = ",")
