@@ -4,6 +4,7 @@ library(vroom)
 library(skimr)
 library(DataExplorer)
 library(patchwork)
+library(glmnet)
 
 ## EDA
 train_data <- vroom("C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/train.csv")
@@ -71,7 +72,9 @@ bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>%
   step_mutate(holiday = as.factor(holiday)) %>% 
   step_mutate(workingday = as.factor(workingday)) %>% 
   step_rm(datetime_hour) %>% 
-  step_rm(atemp)
+  step_rm(atemp) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) 
 
 prepped_bike_recipe <- prep(bike_recipe)
 bake(prepped_bike_recipe, new_data = clean_train_data)
@@ -97,4 +100,27 @@ kaggle_submission <- bike_preds %>%
 
 vroom_write(x = kaggle_submission,
             file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/LinearPreds.csv", 
+            delim = ",")
+
+## Penalized regression model
+preg_model <- linear_reg(penalty = .01, mixture = 0.1) %>% 
+  set_engine("glmnet")
+
+preg_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(preg_model) %>% 
+  fit(data = clean_train_data)
+
+preg_bike_preds <- exp(predict(preg_wf, new_data = test_data))
+
+# Prepare for submission
+kaggle_submission <- preg_bike_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/PregLinearPreds.csv", 
             delim = ",")
