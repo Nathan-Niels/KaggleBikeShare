@@ -5,6 +5,9 @@ library(skimr)
 library(DataExplorer)
 library(patchwork)
 library(glmnet)
+library(rpart)
+library(ranger)
+library(stacks)
 
 ## EDA
 train_data <- vroom("C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/train.csv")
@@ -74,7 +77,8 @@ bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>%
   step_rm(datetime) %>% 
   step_rm(atemp) %>% 
   step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_interact(~ all_predictors() * all_predictors())
 
 prepped_bike_recipe <- prep(bike_recipe)
 bake(prepped_bike_recipe, new_data = clean_train_data)
@@ -181,4 +185,214 @@ kaggle_submission <- tpreg_bike_preds %>%
 
 vroom_write(x = kaggle_submission,
             file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/TPregLinearPreds.csv", 
+            delim = ",")
+
+## Regression Tree
+rt_model <- decision_tree(tree_depth = tune(),
+                          cost_complexity = tune(),
+                          min_n = tune()) %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+# Set workflow
+rt_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(rt_model)
+
+# Grid of values to tune over
+rt_tune_grid <- grid_regular(tree_depth(),
+                          cost_complexity(),
+                          min_n(),
+                          levels = 5) # 25 total tuning parameter possibilities
+
+# Split data for CV
+rt_folds <- vfold_cv(clean_train_data, v = 5, repeats = 1)
+
+# Run CV
+rt_CV_results <- rt_wf %>% 
+  tune_grid(resamples = rt_folds,
+            grid = rt_tune_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# Plot Results
+collect_metrics(rt_CV_results) %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(data = ., 
+         aes(x = tree_depth, y = cost_complexity, color = factor(min_n))) +
+  geom_line()
+
+# Find Best Tuning Parameters
+rt_best_tune <- rt_CV_results %>% 
+  select_best(metric = "rmse")
+rt_best_tune
+
+# Finalize workflow and fit it
+final_wf <- rt_wf %>% 
+  finalize_workflow(rt_best_tune) %>% 
+  fit(data = clean_train_data)
+
+# Predict
+rt_bike_preds <- exp(predict(final_wf, new_data = test_data))
+
+# Prepare for submission
+kaggle_submission <- rt_bike_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/RTLinearPreds.csv", 
+            delim = ",")
+
+## Random Forest
+
+rf_model <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 500) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+# Create workflow with model & recipe
+rf_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(rf_model)
+
+# Set up grid of tuning values
+rf_tune_grid <- grid_regular(mtry(range = c(1,33)),
+                             min_n(),
+                             levels = 5) 
+
+# Set up K-fold CV
+rf_folds <- vfold_cv(clean_train_data, v = 5, repeats = 1)
+
+rf_CV_results <- rf_wf %>% 
+  tune_grid(resamples = rf_folds,
+            grid = rf_tune_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# Find best tuning parameters
+rf_best_tune <- rf_CV_results %>% 
+  select_best(metric = "rmse")
+rf_best_tune
+
+# Finalize workflow and predict
+rf_final_wf <- rf_wf %>% 
+  finalize_workflow(rf_best_tune) %>% 
+  fit(data = clean_train_data)
+
+rf_bike_preds <- exp(predict(rf_final_wf, new_data = test_data))
+
+# Prepare for kaggle submission
+kaggle_submission <- rf_bike_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/RFLinearPreds.csv", 
+            delim = ",")
+
+## Stacking
+# Split data for CV
+folds <- vfold_cv(clean_train_data, v = 5, repeats = 1)
+
+# Create a control grid
+untunedModel <- control_stack_grid()
+tunedModel <- control_stack_resamples()
+
+# Penalized regression model
+spreg_model <- linear_reg(penalty = tune(),
+                          mixture = tune()) %>% 
+  set_engine("glmnet")
+
+# Set Workflow
+spreg_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(spreg_model)
+
+# Grid of tuning parameter values
+spreg_tuning_grid <- grid_regular(penalty(),
+                                  mixture(),
+                                  levels = 5)
+
+# Run CV
+spreg_models <- spreg_wf %>% 
+  tune_grid(resamples = folds,
+            grid = spreg_tuning_grid,
+            metrics = metric_set(rmse, mae),
+            control = untunedModel)
+
+# Linear regression model
+slin_reg <-
+  linear_reg() %>% 
+  set_engine("lm")
+
+# Set workflow
+slin_reg_wf <-
+  workflow() %>% 
+  add_model(slin_reg) %>% 
+  add_recipe(bike_recipe)
+
+# Finalize model
+slin_reg_model <-
+  fit_resamples(
+    slin_reg_wf,
+    resamples = folds,
+    metrics = metric_set(rmse),
+    control = tunedModel
+  )
+
+# Random Forest Models
+srf_model <- rand_forest(mtry = tune(),
+                        min_n = tune(),
+                        trees = 50) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+# Create workflow with model & recipe
+srf_wf <- workflow() %>% 
+  add_recipe(bike_recipe) %>% 
+  add_model(srf_model)
+
+# Set up grid of tuning values
+srf_tune_grid <- grid_regular(mtry(range = c(1,33)),
+                             min_n(),
+                             levels = 5)
+
+# Run Cv
+srf_models <- srf_wf %>% 
+  tune_grid(resamples = folds,
+            grid = srf_tune_grid,
+            metrics = metric_set(rmse, mae, rsq),
+            control = untunedModel)
+
+# Specify which models to include
+my_stack <- stacks() %>% 
+  add_candidates(slin_reg_model) %>% 
+  add_candidates(spreg_models) %>% 
+  add_candidates(srf_models)
+
+# Fit the stacked model
+stack_mod <- my_stack %>% 
+  blend_predictions() %>% 
+  fit_members()
+
+# Use stacked data to get prediction
+stack_preds <- stack_mod %>% 
+                  predict(new_data = test_data)
+
+# Prepare for kaggle submission
+kaggle_submission <- stack_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/StackLinearPreds.csv", 
             delim = ",")
