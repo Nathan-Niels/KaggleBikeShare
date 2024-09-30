@@ -8,6 +8,7 @@ library(glmnet)
 library(rpart)
 library(ranger)
 library(stacks)
+library(earth)
 
 ## EDA
 train_data <- vroom("C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/train.csv")
@@ -77,11 +78,27 @@ bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>%
   step_rm(datetime) %>% 
   step_rm(atemp) %>% 
   step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) %>% 
-  step_interact(~ all_predictors() * all_predictors())
+  step_normalize(all_numeric_predictors())
 
 prepped_bike_recipe <- prep(bike_recipe)
 bake(prepped_bike_recipe, new_data = clean_train_data)
+
+complex_bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>% 
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>% 
+  step_mutate(weather = as.factor(weather)) %>% 
+  step_time(datetime, features = "hour") %>% 
+  step_mutate(datetime_hour = as.factor(datetime_hour)) %>% 
+  step_mutate(season = as.factor(season)) %>%
+  step_mutate(holiday = as.factor(holiday)) %>% 
+  step_mutate(workingday = as.factor(workingday)) %>% 
+  step_rm(datetime) %>% 
+  step_rm(atemp) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_interact(~ all_predictors() * all_predictors())
+prepped_complex_bike_recipe <- prep(complex_bike_recipe) 
+bake(prepped_complex_bike_recipe, new_data = clean_train_data)
+
 
 bike_lm <- linear_reg() %>% 
   set_engine("lm") %>% 
@@ -311,7 +328,7 @@ spreg_model <- linear_reg(penalty = tune(),
 
 # Set Workflow
 spreg_wf <- workflow() %>% 
-  add_recipe(bike_recipe) %>% 
+  add_recipe(complex_bike_recipe) %>% 
   add_model(spreg_model)
 
 # Grid of tuning parameter values
@@ -355,11 +372,11 @@ srf_model <- rand_forest(mtry = tune(),
 
 # Create workflow with model & recipe
 srf_wf <- workflow() %>% 
-  add_recipe(bike_recipe) %>% 
+  add_recipe(complex_bike_recipe) %>% 
   add_model(srf_model)
 
 # Set up grid of tuning values
-srf_tune_grid <- grid_regular(mtry(range = c(1,33)),
+srf_tune_grid <- grid_regular(mtry(range = c(1:33)),
                              min_n(),
                              levels = 5)
 
@@ -395,4 +412,48 @@ kaggle_submission <- stack_preds %>%
 
 vroom_write(x = kaggle_submission,
             file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/StackLinearPreds.csv", 
+            delim = ",")
+
+# MARS
+mars_mod <- mars(num_terms = tune(),
+                 prod_degree = tune(),
+                 prune_method = "backward") %>% 
+  set_mode("regression") %>% 
+  set_engine("earth")
+
+mars_wf <- workflow() %>% 
+  add_recipe(complex_bike_recipe) %>% 
+  add_model(mars_mod)
+
+mars_tune_grid <- expand.grid(num_terms = c(1:10),
+                              prod_degree = c(1,2))
+
+mars_CV_results <- mars_wf %>% 
+  tune_grid(resamples = folds,
+            grid = mars_tune_grid,
+            metrics = metric_set(rmse, mae, rsq))
+
+# Find best tuning parameters
+mars_best_tune <- mars_CV_results %>% 
+  select_best(metric = "rmse")
+mars_best_tune
+
+# Finalize workflow and predict
+mars_final_wf <- mars_wf %>% 
+  finalize_workflow(mars_best_tune) %>% 
+  fit(data = clean_train_data)
+
+mars_bike_preds <- exp(predict(mars_final_wf, new_data = test_data))
+
+
+# Prepare for kaggle submission
+kaggle_submission <- mars_bike_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/MarsLinearPreds.csv", 
             delim = ",")
