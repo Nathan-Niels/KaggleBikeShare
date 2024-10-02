@@ -9,6 +9,7 @@ library(rpart)
 library(ranger)
 library(stacks)
 library(earth)
+library(dbarts)
 
 ## EDA
 train_data <- vroom("C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/train.csv")
@@ -17,6 +18,7 @@ train_data
 glimpse(train_data)
 skim(train_data)
 plot_intro(train_data)
+
 plot_correlation(train_data)
 plot_bar(train_data)
 plot_histogram(train_data)
@@ -70,8 +72,12 @@ clean_train_data
 bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>% 
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>% 
   step_mutate(weather = as.factor(weather)) %>% 
-  step_time(datetime, features = "hour") %>% 
+  step_time(datetime, features = "hour") %>%
+  step_date(datetime, features = "year") %>%
+  step_date(datetime, features = "month") %>%
   step_mutate(datetime_hour = as.factor(datetime_hour)) %>% 
+  step_mutate(datetime_year = as.factor(datetime_year)) %>% 
+  step_mutate(datetime_year = as.factor(datetime_month)) %>% 
   step_mutate(season = as.factor(season)) %>%
   step_mutate(holiday = as.factor(holiday)) %>% 
   step_mutate(workingday = as.factor(workingday)) %>% 
@@ -86,16 +92,20 @@ bake(prepped_bike_recipe, new_data = clean_train_data)
 complex_bike_recipe <- recipe(log_count ~ ., data = clean_train_data) %>% 
   step_mutate(weather = ifelse(weather == 4, 3, weather)) %>% 
   step_mutate(weather = as.factor(weather)) %>% 
-  step_time(datetime, features = "hour") %>% 
+  step_time(datetime, features = "hour") %>%
+  step_date(datetime, features = "year") %>%
+  step_date(datetime, features = "month") %>%
   step_mutate(datetime_hour = as.factor(datetime_hour)) %>% 
+  step_mutate(datetime_year = as.factor(datetime_year)) %>% 
+  step_mutate(datetime_month = as.factor(datetime_month)) %>%
   step_mutate(season = as.factor(season)) %>%
   step_mutate(holiday = as.factor(holiday)) %>% 
   step_mutate(workingday = as.factor(workingday)) %>% 
   step_rm(datetime) %>% 
-  step_rm(atemp) %>% 
+  step_interact(~ workingday:datetime_hour) %>% 
+  step_zv(all_predictors()) %>%
   step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) %>% 
-  step_interact(~ all_predictors() * all_predictors())
+  step_normalize(all_numeric_predictors())
 prepped_complex_bike_recipe <- prep(complex_bike_recipe) 
 bake(prepped_complex_bike_recipe, new_data = clean_train_data)
 
@@ -105,7 +115,7 @@ bike_lm <- linear_reg() %>%
   set_mode("regression")
 
 bike_workflow <- workflow() %>% 
-  add_recipe(bike_recipe) %>% 
+  add_recipe(complex_bike_recipe) %>% 
   add_model(bike_lm) %>% 
   fit(data = clean_train_data)
 
@@ -273,7 +283,7 @@ rf_model <- rand_forest(mtry = tune(),
 
 # Create workflow with model & recipe
 rf_wf <- workflow() %>% 
-  add_recipe(bike_recipe) %>% 
+  add_recipe(complex_bike_recipe) %>% 
   add_model(rf_model)
 
 # Set up grid of tuning values
@@ -376,7 +386,7 @@ srf_wf <- workflow() %>%
   add_model(srf_model)
 
 # Set up grid of tuning values
-srf_tune_grid <- grid_regular(mtry(range = c(1:33)),
+srf_tune_grid <- grid_regular(mtry(range = c(1,33)),
                              min_n(),
                              levels = 5)
 
@@ -400,7 +410,7 @@ stack_mod <- my_stack %>%
 
 # Use stacked data to get prediction
 stack_preds <- stack_mod %>% 
-                  predict(new_data = test_data)
+                  exp(predict(new_data = test_data))
 
 # Prepare for kaggle submission
 kaggle_submission <- stack_preds %>% 
@@ -456,4 +466,28 @@ kaggle_submission <- mars_bike_preds %>%
 
 vroom_write(x = kaggle_submission,
             file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/MarsLinearPreds.csv", 
+            delim = ",")
+
+# BART
+bart_model <- parsnip::bart(trees = 500) %>% 
+  set_mode("regression") %>% 
+  set_engine("dbarts")
+
+bart_wf <- workflow() %>% 
+  add_recipe(complex_bike_recipe) %>% 
+  add_model(bart_model) %>% 
+  fit(data = clean_train_data)
+
+bart_bike_preds <- exp(predict(bart_wf, new_data = test_data))
+
+# Prepare for kaggle submission
+kaggle_submission <- bart_bike_preds %>% 
+  bind_cols(., test_data) %>% 
+  select(datetime, .pred) %>% 
+  rename(count = .pred) %>% 
+  mutate(count = pmax(0, count)) %>% 
+  mutate(datetime = as.character(format(datetime)))
+
+vroom_write(x = kaggle_submission,
+            file = "C:/Users/nsnie/OneDrive/BYU Classes/Fall 2024/STAT 348/KaggleBikeShare/BartPreds.csv", 
             delim = ",")
